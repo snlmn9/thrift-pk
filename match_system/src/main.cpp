@@ -8,6 +8,11 @@
 #include <thrift/transport/TBufferTransports.h>
 
 #include <iostream>
+#include <mutex>
+#include <thread>
+#include <condition_variable>
+#include <queue>
+
 
 using namespace ::apache::thrift;
 using namespace ::apache::thrift::protocol;
@@ -16,6 +21,17 @@ using namespace ::apache::thrift::server;
 
 using namespace  ::match_service;
 using namespace std;
+
+struct Task {
+    User user;
+    string type;
+};
+
+struct MessageQueue {
+    queue<Task> q;
+    mutex m;
+    condition_variable cv;
+}message_queue;
 
 class MatchHandler : virtual public MatchIf {
  public:
@@ -26,16 +42,35 @@ class MatchHandler : virtual public MatchIf {
   int32_t add_user(const User& user, const std::string& info) {
     // Your implementation goes here
     printf("add_user\n");
+
+    unique_lock<mutex> lck(message_queue.m);
+    message_queue.q.push({user, "add"});
     return 0;
   }
 
   int32_t remove_user(const User& user, const std::string& info) {
     // Your implementation goes here
     printf("remove_user\n");
+    unique_lock<mutex> lck(message_queue.m);
+    message_queue.q.push({user, "remove"});
     return 0;
   }
 
 };
+
+void consume_task() {
+    while (true) {
+        if (message_queue.q.empty()) {
+            continue;
+        } else {
+            auto task = message_queue.q.front();
+            message_queue.q.pop();
+
+            // do task
+
+        }
+    }
+}
 
 int main(int argc, char **argv) {
   int port = 9090;
@@ -48,6 +83,8 @@ int main(int argc, char **argv) {
   TSimpleServer server(processor, serverTransport, transportFactory, protocolFactory);
 
   cout << "Start Match Server" << endl;
+  thread match_thread(consume_task);
+
   server.serve();
   return 0;
 }
