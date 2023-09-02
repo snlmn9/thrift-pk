@@ -12,6 +12,8 @@
 #include <thread>
 #include <condition_variable>
 #include <queue>
+#include <vector>
+
 
 
 using namespace ::apache::thrift;
@@ -33,6 +35,36 @@ struct MessageQueue {
     condition_variable cv;
 }message_queue;
 
+class Pool {
+    public:
+        void save_result(int a, int b) {
+            cout << "Match Result: " << a << ' ' << b << endl;
+        }
+        void match() {
+            while (users.size() > 1) {
+                auto a = users[0], b = users[1];
+                users.erase(users.begin());
+                users.erase(users.begin());
+
+                save_result(a.id, b.id);
+            }
+        }
+
+        void add(User user) {
+            users.push_back(user);
+        }
+        void remove(User user) {
+            for (uint32_t i = 0; i < users.size(); i ++) {
+                if (users[i].id == user.id) {
+                    users.erase(users.begin() + i);
+                    break;
+                }
+            }
+        }
+    private:
+        vector<User> users;
+}pool;
+
 class MatchHandler : virtual public MatchIf {
  public:
   MatchHandler() {
@@ -45,6 +77,7 @@ class MatchHandler : virtual public MatchIf {
 
     unique_lock<mutex> lck(message_queue.m);
     message_queue.q.push({user, "add"});
+    message_queue.cv.notify_all();
     return 0;
   }
 
@@ -53,6 +86,7 @@ class MatchHandler : virtual public MatchIf {
     printf("remove_user\n");
     unique_lock<mutex> lck(message_queue.m);
     message_queue.q.push({user, "remove"});
+    message_queue.cv.notify_all();
     return 0;
   }
 
@@ -60,14 +94,19 @@ class MatchHandler : virtual public MatchIf {
 
 void consume_task() {
     while (true) {
+        unique_lock<mutex> lck(message_queue.m);
         if (message_queue.q.empty()) {
-            continue;
+            message_queue.cv.wait(lck);
         } else {
             auto task = message_queue.q.front();
             message_queue.q.pop();
+            lck.unlock(); 
 
             // do task
+            if (task.type == "add") pool.add(task.user);
+            else if (task.type == "remove") pool.remove(task.user);
 
+            pool.match();
         }
     }
 }
