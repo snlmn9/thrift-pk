@@ -3,6 +3,7 @@
 
 #include "match_server/Match.h"
 #include "save_client/Save.h"
+
 #include <thrift/concurrency/ThreadManager.h>
 #include <thrift/concurrency/ThreadFactory.h>
 #include <thrift/protocol/TBinaryProtocol.h>
@@ -59,30 +60,44 @@ class Pool {
 			try {
 				transport->open();
 
-                int res = client.save_data("acs_3765", "64bd66ad", a, b);
-                if (!res) puts("success");
-                else puts("failed");
-                
+				int res = client.save_data("acs_3765", "64bd66ad", a, b);
+				if (!res) puts("success");
+				else puts("failed");
+
 				transport->close();
 			} catch (TException& tx) {
 				cout << "ERROR: " << tx.what() << endl;
 			}
 		}
-		void match() {
-			while (users.size() > 1) {
-                sort(users.begin(), users.end(), [&](User a, User b) {
-                    return a.score < b.score;
-                });
-                bool flag = true;
-                for (uint32_t i = 1; i < users.size(); i ++) {
-                    auto a = users[i - 1], b = users[i];
-                    if (b.score - a.score <= 50) {
-                        users.erase(users.begin() + i - 1, users.begin() + i + 1);
-                        save_result(a.id, b.id);
+        bool check_match(uint32_t i, uint32_t j) {
+            auto a = users[i], b = users[j];
 
-                        flag = false;
-                        break;
+            int dt = abs(a.score - b.score);
+            int a_max_dif = wt[i] * 50;
+            int b_max_dif = wt[j] * 50;
+            return dt < a_max_dif && dt <= b_max_dif;
+        }
+		void match() {
+            for (uint32_t i = 0; i < wt.size(); i ++) {
+                wt[i] ++;
+            }
+			while (users.size() > 1) {
+				bool flag = true;
+				for (uint32_t i = 0; i < users.size(); i ++) {
+                    for (uint32_t j = i + 1; j < users.size(); j ++) {
+                        auto a = users[i], b = users[j];
+                        if (check_match(i, j)) {
+                            users.erase(users.begin() + j);
+                            users.erase(users.begin() + i);
+                            wt.erase(wt.begin() + j);
+                            wt.erase(wt.begin() + i);
+                            save_result(a.id, b.id);
+                            flag = false;
+                            break;
+
+                        }
                     }
+                    if (!flag) break;
                 }
                 if (flag) break;
 			}
@@ -90,17 +105,20 @@ class Pool {
 
 		void add(User user) {
 			users.push_back(user);
+            wt.push_back(0);
 		}
 		void remove(User user) {
 			for (uint32_t i = 0; i < users.size(); i ++) {
 				if (users[i].id == user.id) {
 					users.erase(users.begin() + i);
+                    wt.erase(wt.begin() + i);
 					break;
 				}
 			}
 		}
 	private:
 		vector<User> users;
+        vector<int> wt; // wait time
 }pool;
 
 class MatchHandler : virtual public MatchIf {
@@ -131,32 +149,32 @@ class MatchHandler : virtual public MatchIf {
 };
 
 class MatchCloneFactory : virtual public MatchIfFactory {
- public:
-  ~MatchCloneFactory() override = default;
-  MatchIf* getHandler(const ::apache::thrift::TConnectionInfo& connInfo) override
-  {
-    std::shared_ptr<TSocket> sock = std::dynamic_pointer_cast<TSocket>(connInfo.transport);
-    /*cout << "Incoming connection\n";
-    cout << "\tSocketInfo: "  << sock->getSocketInfo() << "\n";
-    cout << "\tPeerHost: "    << sock->getPeerHost() << "\n";
-    cout << "\tPeerAddress: " << sock->getPeerAddress() << "\n";
-    cout << "\tPeerPort: "    << sock->getPeerPort() << "\n";
-    */
-    return new MatchHandler;
-  }
-  void releaseHandler( MatchIf* handler) override {
-    delete handler;
-  }
+	public:
+		~MatchCloneFactory() override = default;
+		MatchIf* getHandler(const ::apache::thrift::TConnectionInfo& connInfo) override
+		{
+			std::shared_ptr<TSocket> sock = std::dynamic_pointer_cast<TSocket>(connInfo.transport);
+			/*cout << "Incoming connection\n";
+			  cout << "\tSocketInfo: "  << sock->getSocketInfo() << "\n";
+			  cout << "\tPeerHost: "    << sock->getPeerHost() << "\n";
+			  cout << "\tPeerAddress: " << sock->getPeerAddress() << "\n";
+			  cout << "\tPeerPort: "    << sock->getPeerPort() << "\n";
+			  */
+			return new MatchHandler;
+		}
+		void releaseHandler( MatchIf* handler) override {
+			delete handler;
+		}
 };
 
 void consume_task() {
 	while (true) {
 		unique_lock<mutex> lck(message_queue.m);
+        
 		if (message_queue.q.empty()) {
-			message_queue.cv.wait(lck);
-            lck.unlock();
-            pool.match();
-            sleep(1);
+			lck.unlock();
+			pool.match();
+			sleep(1);
 		} else {
 			auto task = message_queue.q.front();
 			message_queue.q.pop();
@@ -165,18 +183,16 @@ void consume_task() {
 			// do task
 			if (task.type == "add") pool.add(task.user);
 			else if (task.type == "remove") pool.remove(task.user);
-
-			pool.match();
 		}
 	}
 }
 
 int main(int argc, char **argv) {
 	TThreadedServer server(
-    std::make_shared<MatchProcessorFactory>(std::make_shared<MatchCloneFactory>()),
-    std::make_shared<TServerSocket>(9090), //port
-    std::make_shared<TBufferedTransportFactory>(),
-    std::make_shared<TBinaryProtocolFactory>());
+			std::make_shared<MatchProcessorFactory>(std::make_shared<MatchCloneFactory>()),
+			std::make_shared<TServerSocket>(9090), //port
+			std::make_shared<TBufferedTransportFactory>(),
+			std::make_shared<TBinaryProtocolFactory>());
 
 	cout << "Start Match Server" << endl;
 
